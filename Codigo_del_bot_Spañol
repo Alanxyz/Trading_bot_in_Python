@@ -1,0 +1,85 @@
+import numpy as np
+
+class SimpleBreakoutExample(QCAlgorithm):
+
+    def Initialize(self):
+        # Configurar el efectivo para backtest
+        self.SetCash(100000)
+        
+        # Fechas de inicio y finalización para backtest
+        self.SetStartDate(2017,9,1)
+        self.SetEndDate(2020,9,1)
+        
+        # Agregar activo
+        self.symbol = self.AddEquity("SPY", Resolution.Daily).Symbol
+        
+        # Longitud al pasado b/o (en días)
+        self.lookback = 20
+        
+        # Límite superior / inferior para la longitud al pasado
+        self.ceiling, self.floor = 30, 10
+        
+        # Compensación de precio para orden de detención
+        self.initialStopRisk = 0.98
+        self.trailingStopRisk = 0.9
+        
+        # Programar función 20 minutos después de cada mercado abierto
+        self.Schedule.On(self.DateRules.EveryDay(self.symbol), \
+                        self.TimeRules.AfterMarketOpen(self.symbol, 20), \
+                        Action(self.EveryMarketOpen))
+
+
+    def OnData(self, data):
+        # Trazar el precio de la seguridad
+        self.Plot("Data Chart", self.symbol, self.Securities[self.symbol].Close)
+
+ 
+    def EveryMarketOpen(self):
+        # Determine dinámicamente la duración al pasado según la tasa de cambio de volatilidad de 30 días
+        close = self.History(self.symbol, 31, Resolution.Daily)["close"]
+        todayvol = np.std(close[1:31])
+        yesterdayvol = np.std(close[0:30])
+        deltavol = (todayvol - yesterdayvol) / todayvol
+        self.lookback = round(self.lookback * (1 + deltavol))
+        
+        # Tenga en cuenta el límite superior / inferior de la longitud del bloqueo
+        if self.lookback > self.ceiling:
+            self.lookback = self.ceiling
+        elif self.lookback < self.floor:
+            self.lookback = self.floor
+        
+        # Lista de los máximos del día
+        self.high = self.History(self.symbol, self.lookback, Resolution.Daily)["high"]
+        
+        # Comprar en caso de rotura
+        if not self.Securities[self.symbol].Invested and \
+                self.Securities[self.symbol].Close >= max(self.high[:-1]):
+            self.SetHoldings(self.symbol, 1)
+            self.breakoutlvl = max(self.high[:-1])
+            self.highestPrice = self.breakoutlvl
+        
+        
+        # Cree un stop loss dinámico si se invierte
+        if self.Securities[self.symbol].Invested:
+            
+            # Si no existe una orden, envíe stop-loss
+            if not self.Transactions.GetOpenOrders(self.symbol):
+                self.stopMarketTicket = self.StopMarketOrder(self.symbol, \
+                                        -self.Portfolio[self.symbol].Quantity, \
+                                        self.initialStopRisk * self.breakoutlvl)
+            
+            # Compruebe si el precio del activo es más alto que el precio más alto y el precio de stop dinámico no es inferior al precio de stop inicial
+            if self.Securities[self.symbol].Close > self.highestPrice and \
+                    self.initialStopRisk * self.breakoutlvl < self.Securities[self.symbol].Close * self.trailingStopRisk:
+                # Guarde el nuevo precio más alto al más alto
+                self.highestPrice = self.Securities[self.symbol].Close
+                # Actualizar el precio de parada
+                updateFields = UpdateOrderFields()
+                updateFields.StopPrice = self.Securities[self.symbol].Close * self.trailingStopRisk
+                self.stopMarketTicket.Update(updateFields)
+                
+                # Imprima el nuevo precio stop con Debug ()
+                self.Debug(updateFields.StopPrice)
+            
+            # Trazar el precio del trailing stop
+            self.Plot("Data Chart", "Stop Price", self.stopMarketTicket.Get(OrderField.StopPrice))
